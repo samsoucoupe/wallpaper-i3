@@ -1,6 +1,6 @@
 #!/bin/bash
 # -----------------------------
-# Convertit les nouveaux GIF en sets d'images
+# Convertit les nouveaux médias (GIF/MP4) en sets d'images
 # Compatible ImageMagick 6 (utilise convert)
 # -----------------------------
 
@@ -135,12 +135,16 @@ get_frame_count() {
     return 0
 }
 
-# Fonction pour convertir un GIF si le set n'existe pas
-convert_gif () {
-    local gif="$1"
+# Fonction pour convertir un média (GIF/MP4) si le set n'existe pas
+convert_media () {
+    local media="$1"
     local name
-    name=$(basename "$gif" .gif)
+    name=$(basename "$media")
+    name="${name%.*}"
     local outdir="$SETS/$name"
+    local ext
+    ext="${media##*.}"
+    ext="${ext,,}"
 
     echo "Traitement : $name"
 
@@ -153,21 +157,37 @@ convert_gif () {
     mkdir -p "$tmpdir"
 
     local frame_count_in
-    frame_count_in=$(get_frame_count "$gif")
+    if [ "$ext" = "gif" ]; then
+        frame_count_in=$(get_frame_count "$media")
+    else
+        frame_count_in=0
+        if command -v ffprobe >/dev/null 2>&1; then
+            frame_count_in=$(ffprobe -v error -count_frames -select_streams v:0 \
+                -show_entries stream=nb_read_frames -of default=nw=1:nk=1 "$media" 2>/dev/null | head -n1 || true)
+
+            if ! [[ "$frame_count_in" =~ ^[0-9]+$ ]] || [ "$frame_count_in" -eq 0 ]; then
+                frame_count_in=$(ffprobe -v error -select_streams v:0 \
+                    -show_entries stream=nb_frames -of default=nw=1:nk=1 "$media" 2>/dev/null | head -n1 || true)
+            fi
+        fi
+    fi
+
     if ! [[ "$frame_count_in" =~ ^[0-9]+$ ]]; then
         frame_count_in=0
     fi
 
-    local input_spec="$gif"
+    local input_spec="$media"
     local step=1
     if [ "$frame_count_in" -gt "$MAX_FRAMES" ]; then
         step=$(( (frame_count_in + MAX_FRAMES - 1) / MAX_FRAMES ))
-        input_spec="${gif}[0--1x${step}]"
-        echo "GIF lourd détecté ($frame_count_in frames) : échantillonnage 1/${step}"
+        if [ "$ext" = "gif" ]; then
+            input_spec="${media}[0--1x${step}]"
+        fi
+        echo "Média lourd détecté ($frame_count_in frames) : échantillonnage 1/${step}"
     fi
 
     # Conversion dans un dossier temporaire, puis publication atomique
-    if run_convert "$input_spec" "$tmpdir/${name}_%03d.png"; then
+    if [ "$ext" = "gif" ] && run_convert "$input_spec" "$tmpdir/${name}_%03d.png"; then
 
         local frame_count
         frame_count=$(find "$tmpdir" -maxdepth 1 -type f -name '*.png' | wc -l)
@@ -179,31 +199,36 @@ convert_gif () {
         fi
 
         mv "$tmpdir" "$outdir"
-        echo "GIF converti : $gif → $outdir ($frame_count frames)"
+        echo "Média converti : $media → $outdir ($frame_count frames)"
     else
-        echo "Échec conversion ImageMagick, tentative ffmpeg : $gif"
+        if [ "$ext" != "gif" ]; then
+            echo "Conversion ffmpeg : $media"
+        else
+            echo "Échec conversion ImageMagick, tentative ffmpeg : $media"
+        fi
         rm -rf "$tmpdir"
         mkdir -p "$tmpdir"
 
-        if run_ffmpeg_convert "$gif" "$tmpdir/${name}_%03d.png" "$step"; then
+        if run_ffmpeg_convert "$media" "$tmpdir/${name}_%03d.png" "$step"; then
             local ffmpeg_frames
             ffmpeg_frames=$(find "$tmpdir" -maxdepth 1 -type f -name '*.png' | wc -l)
 
             if [ "$ffmpeg_frames" -gt 0 ]; then
                 mv "$tmpdir" "$outdir"
-                echo "GIF converti via ffmpeg : $gif → $outdir ($ffmpeg_frames frames)"
+                echo "Média converti via ffmpeg : $media → $outdir ($ffmpeg_frames frames)"
             else
-                echo "Échec conversion : aucune frame générée pour $gif"
+                echo "Échec conversion : aucune frame générée pour $media"
                 rm -rf "$tmpdir"
             fi
         else
-            echo "Échec conversion (ressources insuffisantes ou GIF invalide) : $gif"
+            echo "Échec conversion (ressources insuffisantes ou média invalide) : $media"
             rm -rf "$tmpdir"
         fi
     fi
 }
 
-# Parcours et conversion de tous les GIFs du dossier source
-for g in "$GIFSRC"/*.gif; do
-    [ -f "$g" ] && convert_gif "$g"
+# Parcours et conversion de tous les GIF/MP4 du dossier source
+for g in "$GIFSRC"/*.{gif,mp4}; do
+    echo "Vérification : $g"
+    [ -f "$g" ] && convert_media "$g"
 done
